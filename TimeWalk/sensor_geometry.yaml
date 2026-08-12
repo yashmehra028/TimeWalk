@@ -1,0 +1,22 @@
+# Geometrical configuration for Quad-Module IT Phase-2
+# RD53B / CROC: 336 rows (0-335) x 432 columns (0-431)
+
+chip_0_2:
+  # Chip 0 and 2:
+  # 87.5x225 um^2 pixels: [0;0] and [0;1]
+  # 87.5x225 um^2 pixels: from [0;2] to [0;335]
+  # 25x225 um^2 pixels: from [1;0] to [431;0]
+  #                     from [1;1] to [431;1]
+  # 22x100 um^2 pixels: from [1;2] to [431;335]
+  long_rows: [0, 1]
+  long_cols: [0]
+
+chip_1_3:
+  # Chip 1 and 3:
+  # 87.5x225 um^2 pixels: [431;0] and [431;1]
+  # 87.5x225 um^2 pixels: from [431;2] to [431;335]
+  # 25x225 um^2 pixels: from [0;0] to [430;0]
+  #                     from [0;1] to [430;1]
+  # 22x100 um^2 pixels: from [0;2] to [430;335]
+  long_rows: [0, 1]
+  long_cols: [431]

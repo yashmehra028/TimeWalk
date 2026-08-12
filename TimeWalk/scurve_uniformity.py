@@ -11,6 +11,10 @@ import numpy as np
 # Geometry and Mask Management
 # ==========================================
 def parse_mask_file(filepath):
+    """
+    Reads a pixel mask text file and extracts the active pixels.
+    Returns a set of (row, col) tuples.
+    """
     active_pixels = set()
     if not os.path.isfile(filepath):
         print(f" [!] Error: The mask file '{filepath}' was not found.")
@@ -19,9 +23,11 @@ def parse_mask_file(filepath):
     with open(filepath, 'r') as file:
         for line in file:
             line = line.strip()
+            # Ignore empty lines or lines that do not contain the 'en' (enable) flag
             if not line or 'en' not in line:
                 continue
 
+            # Extract row and column indices from the string
             parts = line.split()
             try:
                 row = int(parts[1])
@@ -32,11 +38,15 @@ def parse_mask_file(filepath):
     return active_pixels
 
 class GeometryManager:
+    """
+    Handles the classification of pixels based on their physical dimensions using a YAML configuration file.
+    """
     def __init__(self, yaml_filepath="sensor_geometry.yaml"):
         with open(yaml_filepath, 'r') as file:
             self.geometry_config = yaml.safe_load(file)
             
     def get_pixel_type(self, row, col, chip_id):
+        # Determine the configuration block based on the logical chip ID
         if chip_id in [0, 2]:
             config = self.geometry_config['chip_0_2']
         elif chip_id in [1, 3]:
@@ -47,15 +57,19 @@ class GeometryManager:
         is_long_row = row in config['long_rows']
         is_long_col = col in config['long_cols']
 
+        # Classify the pixel into one of the four physical sensor geometries
         if is_long_row and is_long_col: return "Macro_Corner" 
-        elif is_long_row:               return "Long_Row"
-        elif is_long_col:               return "Long_Col"
-        else:                           return "Standard"
+        elif is_long_row: return "Long_Row"
+        elif is_long_col: return "Long_Col"
+        else: return "Standard"
 
 # ==========================================
 # Data Extraction
 # ==========================================
 def get_hist_from_file(root_file, path):
+    """
+    Extracts a TH2 histogram from a ROOT file.
+    """
     obj = root_file.Get(path)
     if obj and obj.InheritsFrom("TH2"):
         return obj
@@ -64,6 +78,9 @@ def get_hist_from_file(root_file, path):
     return None
 
 def extract_pixel_data(root_filepath, active_pixels, geo_manager, delay_value, hw_chip_id, logical_chip_id, scan_label):
+    """
+    Opens the ROOT file produced by Ph2_ACF, extracts the 2D Threshold and Noise maps and values.
+    """
     root_file = ROOT.TFile.Open(root_filepath, "READ")
     if not root_file or root_file.IsZombie(): 
         return pd.DataFrame()
@@ -82,13 +99,13 @@ def extract_pixel_data(root_filepath, active_pixels, geo_manager, delay_value, h
     for row, col in active_pixels:
         thr = hist_thr.GetBinContent(col + 1, row + 1)
         
-        # Filter out masked/failed pixels
+        # Filter out pixels with a threshold of 0
         if thr == 0:
             continue
             
         noise = hist_noise.GetBinContent(col + 1, row + 1)
         data_list.append({
-            "ScanLabel": scan_label, # NEW: Track which scan this belongs to
+            "ScanLabel": scan_label,
             "Delay": delay_value, 
             "Chip": logical_chip_id, 
             "Row": row, 
@@ -105,6 +122,9 @@ def extract_pixel_data(root_filepath, active_pixels, geo_manager, delay_value, h
 # Comparison Plot Generation
 # ==========================================
 def generate_comparison_plots(chip_dataframe, chip_id):
+    """
+    Generates overlay plots comparing the Threshold vs. Delay behavior across N different mask configurations.
+    """
     plot_dir = "Comparison_Plots"
     os.makedirs(plot_dir, exist_ok=True)
     print(f"[{plot_dir}] Generating comparative plots for Chip {chip_id} in progress...")
@@ -118,11 +138,11 @@ def generate_comparison_plots(chip_dataframe, chip_id):
         "Standard": "Regular Pixels (25 x 100 $\mu m^2$)"
     }
     
-    # Get unique scans to create a color palette for the different masks
+    # Get unique scans and create a distinct color palette for the different masks
     unique_scans = chip_dataframe["ScanLabel"].unique()
     scan_colors = dict(zip(unique_scans, sns.color_palette("husl", len(unique_scans))))
 
-    # 1. Individual Graphs for Each Pixel Type Comparing the N Scans
+    # Individual Graphs for Each Pixel Type Comparing the N Scans
     for p_type, title in pixel_types.items():
         df_filtered = chip_dataframe[chip_dataframe["Type"] == p_type]
         if df_filtered.empty:
@@ -130,16 +150,16 @@ def generate_comparison_plots(chip_dataframe, chip_id):
             
         plt.figure(figsize=(12, 8))
         
-        # Aggregate data: Group by ScanLabel and Delay
         agg_df = df_filtered.groupby(["ScanLabel", "Delay"]).agg(
             Mean_Thr=("Threshold", "mean"),
             Mean_Noise=("Noise", "mean"),
             Total_Count=("RunCount", "sum") 
         ).reset_index()
         
+        # Compute the statistical error of the mean: Noise / sqrt(N)
         agg_df["Custom_Err"] = agg_df["Mean_Noise"] / np.sqrt(agg_df["Total_Count"])
         
-        # Plot a line with error bars for each scan
+        # Plot a line with error bars for each individual mask scan
         for scan_label in unique_scans:
             scan_data = agg_df[agg_df["ScanLabel"] == scan_label]
             if not scan_data.empty:
@@ -173,32 +193,32 @@ if __name__ == "__main__":
     chip_mapping = {0: 0, 1: 1, 2: 2, 3: 3} 
     delays_to_skip = []
     
-    # Define as many scans as you want to compare
+    # Define as many scans as you want to compare, linking the start run to the specific mask subset
     scans_config = [
         {
             "label": "Mask 1", 
             "start_run": 12081, 
-            "masks": {0: "masks/my_mask_run1.txt", 1: "txt/row0/my_mask_full_1.txt", 2: "txt/row0/my_mask_full_2.txt", 3: "txt/row0/my_mask_full_3.txt"}
+            "masks": {0: "my_mask_0_run1.txt", 1: "my_mask_1_run1.txt", 2: "my_mask_2_run1.txt", 3: "my_mask_3_run1.txt"}
         },
         {
             "label": "Mask 2", 
             "start_run": 12248, 
-            "masks": {0: "masks/my_mask_run2.txt", 1: "txt/row0/my_mask_check_1.txt", 2: "txt/row0/my_mask_check_2.txt", 3: "txt/row0/my_mask_check_3.txt"}
+            "masks": {0: "my_mask_0_run2.txt", 1: "my_mask_1_run2.txt", 2: "my_mask_2_run2.txt", 3: "my_mask_3_run2.txt"}
         },
         {
             "label": "Mask 3", 
             "start_run": 12415, 
-            "masks": {0: "masks/my_mask_run3.txt", 1: "txt/row0/my_mask_sparse_1.txt", 2: "txt/row0/my_mask_sparse_2.txt", 3: "txt/row0/my_mask_sparse_3.txt"}
+            "masks": {0: "my_mask_0_run3.txt", 1: "my_mask_1_run3.txt", 2: "my_mask_2_run3.txt", 3: "my_mask_3_run3.txt"}
         },
          {
             "label": "Mask 4", 
             "start_run": 12582, 
-            "masks": {0: "masks/my_mask_run4.txt", 1: "txt/row0/my_mask_full_1.txt", 2: "txt/row0/my_mask_full_2.txt", 3: "txt/row0/my_mask_full_3.txt"}
+            "masks": {0: "my_mask_0_run4.txt", 1: "my_mask_1_run4.txt", 2: "my_mask_2_run4.txt", 3: "my_mask_3_run4.txt"}
         },
          {
             "label": "Mask 5", 
             "start_run": 12762, 
-            "masks": {0: "masks/my_mask_run5.txt", 1: "txt/row0/my_mask_full_1.txt", 2: "txt/row0/my_mask_full_2.txt", 3: "txt/row0/my_mask_full_3.txt"}
+            "masks": {0: "my_mask_0_run5.txt", 1: "my_mask_1_run5.txt", 2: "my_mask_2_run5.txt", 3: "my_mask_3_run5.txt"}
         }
     ]
     # ===================================================
@@ -244,7 +264,7 @@ if __name__ == "__main__":
                             delay_value=delay_step, 
                             hw_chip_id=hw_id, 
                             logical_chip_id=log_id,
-                            scan_label=scan_label # Pass the label to the dataframe
+                            scan_label=scan_label # Tag the data with the current mask label
                         )
                         
                         if not df_chip.empty:
@@ -255,7 +275,8 @@ if __name__ == "__main__":
     if raw_dataframes:
         raw_master_df = pd.concat(raw_dataframes, ignore_index=True)
         
-        # Per-Pixel Pre-Averaging (Now including ScanLabel in the groupby)
+        # Per-Pixel Pre-Averaging
+        # Averages the 5 identical runs for the exact same pixel before combining geometry types
         master_df = raw_master_df.groupby(
             ["ScanLabel", "Delay", "Chip", "Type", "Row", "Col"]
         ).agg(

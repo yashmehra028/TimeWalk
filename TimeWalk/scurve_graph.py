@@ -11,18 +11,24 @@ from scipy.optimize import curve_fit
 # ==========================================
 # Geometry and Mask Management
 # ==========================================
-def parse_mask_file(filepath="my_mask.txt"):
+def parse_mask_file(filepath):
+    """
+    Reads a pixel mask file and extracts the active pixels.
+    Returns a set of (row, col) tuples.
+    """
     active_pixels = set()
     if not os.path.isfile(filepath):
-        print(f"Error: The mask file '{filepath}' was not found.")
+        print(f" [!] Error: The mask file '{filepath}' was not found.")
         return active_pixels
 
     with open(filepath, 'r') as file:
         for line in file:
             line = line.strip()
+            # Ignore empty lines or lines that do not contain the 'en' (enable) flag
             if not line or 'en' not in line:
                 continue
-
+            
+            # Extract row and column indices from the string
             parts = line.split()
             try:
                 row = int(parts[1])
@@ -33,11 +39,15 @@ def parse_mask_file(filepath="my_mask.txt"):
     return active_pixels
 
 class GeometryManager:
+    """
+    Handles the classification of pixels based on their physical dimensions using a YAML configuration file.
+    """
     def __init__(self, yaml_filepath="sensor_geometry.yaml"):
         with open(yaml_filepath, 'r') as file:
             self.geometry_config = yaml.safe_load(file)
             
     def get_pixel_type(self, row, col, chip_id):
+        # Determine the configuration block based on the logical chip ID
         if chip_id in [0, 2]:
             config = self.geometry_config['chip_0_2']
         elif chip_id in [1, 3]:
@@ -48,6 +58,7 @@ class GeometryManager:
         is_long_row = row in config['long_rows']
         is_long_col = col in config['long_cols']
 
+        # Classify the pixel into one of the four physical sensor geometries
         if is_long_row and is_long_col: return "Macro_Corner" 
         elif is_long_row:               return "Long_Row"
         elif is_long_col:               return "Long_Col"
@@ -57,6 +68,9 @@ class GeometryManager:
 # Extraction (ROOT + XML)
 # ==========================================
 def extract_delay_from_xml(xml_filepath):
+    """
+    Parses the Ph2_ACF XML configuration file to find the injection delay value.
+    """
     if not os.path.isfile(xml_filepath):
         raise FileNotFoundError(f"Error: XML file '{xml_filepath}' not found.")
 
@@ -69,6 +83,9 @@ def extract_delay_from_xml(xml_filepath):
     else: raise ValueError(f"Could not find CAL_EDGE_FINE_DELAY in {xml_filepath}")
 
 def get_hist_from_file(root_file, path):
+    """
+    Extracts TH2 histogram from a ROOT file.
+    """
     obj = root_file.Get(path)
     if obj and obj.InheritsFrom("TH2"):
         return obj
@@ -80,6 +97,9 @@ def get_hist_from_file(root_file, path):
 # Data Merger
 # ==========================================
 def extract_pixel_data(root_filepath, active_pixels, geo_manager, delay_value, hw_chip_id, logical_chip_id):
+    """
+    Opens the ROOT file produced by Ph2_ACF, extracts the 2D Threshold and Noise maps and values.
+    """
     root_file = ROOT.TFile.Open(root_filepath, "READ")
     if not root_file or root_file.IsZombie(): 
         return pd.DataFrame()
@@ -98,7 +118,7 @@ def extract_pixel_data(root_filepath, active_pixels, geo_manager, delay_value, h
     for row, col in active_pixels:
         thr = hist_thr.GetBinContent(col + 1, row + 1)
         
-        # --- Filter out zeros (masked/failed pixels) ---
+        # Exclude pixels with a threshold of 0
         if thr == 0:
             continue
             
@@ -120,9 +140,11 @@ def extract_pixel_data(root_filepath, active_pixels, geo_manager, delay_value, h
 # Mathematical Fit Functions
 # ==========================================
 def sine_func(x, A, B, C, D):
+    # Standard sinusoidal function used to find the global trend of the delay scan
     return A * np.sin(B * x + C) + D
 
 def parabola_func(x, a, b, c):
+    # Parabolic function. 
     return a * (x - b)**2 + c
 
 # ==========================================
@@ -145,6 +167,7 @@ def generate_plots(chip_dataframe, chip_id):
     color_palette = sns.color_palette("Set1", n_colors=4)
     color_map = dict(zip(pixel_types.keys(), color_palette))
 
+    # Iterate over the 4 geometric pixel types to generate individual plots
     for p_type, title in pixel_types.items():
         df_filtered = chip_dataframe[chip_dataframe["Type"] == p_type]
         if df_filtered.empty:
@@ -152,20 +175,22 @@ def generate_plots(chip_dataframe, chip_id):
             
         plt.figure(figsize=(10, 6))
         
-        # 1. Single Pixel Scatter (Now represents the MEAN of the N runs for that pixel)
+        # Plot individual pixel measurements
         sns.scatterplot(
             data=df_filtered, x="Delay", y="Threshold", 
             color=color_map[p_type], alpha=0.05, edgecolor=None, s=20, label="Singular Pixels (Mean)"
         )
         
-        # 2. Custom Error Bars
-        # We aggregate over Delay, and sum up the 'RunCount' to get the true total measurements
+        # Error bar computation
+        # Aggregate the data by delay step. 
+        # Compute the mean threshold and noise, and sum the total number of physical runs contributing to this point.
         agg_df = df_filtered.groupby("Delay").agg(
             Mean_Thr=("Threshold", "mean"),
             Mean_Noise=("Noise", "mean"),
-            Total_Count=("RunCount", "sum") # N_pixels * N_runs
+            Total_Count=("RunCount", "sum")
         ).reset_index()
         
+        # Statistical error of the mean: Average Noise divided by sqrt(N)
         agg_df["Custom_Err"] = agg_df["Mean_Noise"] / np.sqrt(agg_df["Total_Count"])
         
         plt.errorbar(
@@ -173,12 +198,14 @@ def generate_plots(chip_dataframe, chip_id):
             color="black", marker="o", linewidth=2, capsize=4, label="Mean $\pm$ Noise/$\sqrt{N_{total}}$"
         )
         
-        # 3. Fit Strategy
+        # Fit
         x_data = agg_df['Delay'].values
         y_data = agg_df['Mean_Thr'].values
         yerr_data = agg_df['Custom_Err'].values
         
+        # Require at least 5 points to fit a 4-parameter curve
         if len(x_data) >= 5:
+            # Skip fitting if the curve is physically flat
             if (np.max(y_data) - np.min(y_data)) < 2.0:
                 print(f"   -> Skipping fits for {p_type}: Threshold is practically flat.")
             else:
@@ -189,6 +216,7 @@ def generate_plots(chip_dataframe, chip_id):
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore", OptimizeWarning)
                         
+                        # Global Sine Fit (Used as a hint)
                         guess_offset = np.mean(y_data)
                         guess_amp = (np.max(y_data) - np.min(y_data)) / 2.0
                         guess_freq = 2.0 * np.pi / 32.0 
@@ -196,15 +224,17 @@ def generate_plots(chip_dataframe, chip_id):
                         
                         popt_sine, _ = curve_fit(sine_func, x_data, y_data, p0=p0_sine, maxfev=10000)
                         
+                        # Generate sine curve to find its mathematical peak
                         x_sine_scan = np.linspace(np.min(x_data), np.max(x_data), 500)
                         y_sine_scan = sine_func(x_sine_scan, *popt_sine)
                         
-                        # --- SEARCH FOR MAXIMUM ---
+                        # Search for the max of the sine wave
                         max_x_sine = x_sine_scan[np.argmax(y_sine_scan)]
-                        # --------------------------
                         
                         plt.plot(x_sine_scan, y_sine_scan, color='gray', linestyle=':', alpha=0.5, label='Sine Hint')
 
+                        # Local Parabolic Fit
+                        # Use only a 21-point window around the sine maximum
                         idx_center = np.argmin(np.abs(x_data - max_x_sine))
                         idx_start = max(0, idx_center - 10)
                         idx_end = min(len(x_data), idx_center + 11)
@@ -215,29 +245,29 @@ def generate_plots(chip_dataframe, chip_id):
                         
                         yerr_safe = np.where(yerr_window <= 0, 1e-3, yerr_window)
                         
-                        # --- PARABOLA GUESS FOR MAXIMUM ---
-                        # 'a' is guessed as -1.0 to point downwards. 'c' is guessed as the local peak.
+                        # Parabola fit
                         p0_para = [-1.0, max_x_sine, np.max(y_window)]
-                        
-                        # bounds constrain 'a' to be <= 0 so it only fits "peaks"
                         popt_para, pcov_para = curve_fit(
                             parabola_func, x_window, y_window, 
                             p0=p0_para, bounds=([-np.inf, -np.inf, -np.inf], [0, np.inf, np.inf]),
                             sigma=yerr_safe, absolute_sigma=True, maxfev=10000
                         )
-                        # ----------------------------------
                         
+                        # Extract the statistical error of the fit parameters
                         perr_para = np.sqrt(np.diag(pcov_para))
                         
+                        # Extract the X-coordinate of the vertex and uncertainty
                         max_x_para = popt_para[1]
                         err_x_para = perr_para[1]
                         max_y_para = popt_para[2]
 
+                        # Chi-squared per DOF
                         y_fit_para_pts = parabola_func(x_window, *popt_para)
                         chi_sq = np.sum(((y_window - y_fit_para_pts) / yerr_safe)**2)
                         ndf = len(x_window) - len(popt_para)
                         reduced_chi_sq = chi_sq / ndf if ndf > 0 else 0
                         
+                        # Plot the final parabolic fit
                         x_para_plot = np.linspace(np.min(x_window), np.max(x_window), 200)
                         y_para_plot = parabola_func(x_para_plot, *popt_para)
                         
@@ -263,7 +293,7 @@ def generate_plots(chip_dataframe, chip_id):
         plt.savefig(filename, dpi=300, bbox_inches="tight")
         plt.close()
 
-    # 4. Combined Graph
+    # Combined Graph (All geometries overlayed)
     plt.figure(figsize=(12, 8))
     
     sns.scatterplot(
@@ -307,37 +337,33 @@ if __name__ == "__main__":
     # ===================================================
     start_run = 13131
     num_scans = 32
-    
-    # --- Runs per delay ---
     runs_per_delay = 1
-    # ---------------------------
     
-    # Map for Quad Module. Format is {Hardware_ID : Logical_ID}
+    # Map for Quad Module. Format is {Hardware_ID : Logical_ID} and option to esclude certain delays 
     chip_mapping = {0: 0, 1: 1, 2: 2, 3: 3} 
     delays_to_skip = []
-    # ===================================================
-    
+
     geo = GeometryManager("sensor_geometry.yaml")
     
-    # Pre-load the specific mask file for each chip
+    # Pre-load mask file for each logical chip ID
     active_masks = {}
     for log_id in chip_mapping.values():
-        mask_filepath = f"txt/row1/my_mask_{log_id}.txt"
+        mask_filepath = f"my_mask_{log_id}.txt"
         print(f"Loading mask for Chip {log_id} from {mask_filepath}...")
         active_masks[log_id] = parse_mask_file(mask_filepath)
 
     raw_dataframes = []
 
+    # Main execution loop over all delay steps and repetitions
     for delay_step in range(num_scans):
         
         if delay_step in delays_to_skip:
             print(f"\n[!] Skipping Delay = {delay_step} as requested in configuration.")
             continue
             
-        # Inner loop to process the multiple runs per delay
         for rep in range(runs_per_delay):
             
-            # Mathematical calculation for the run number
+            # ROOT file number computation
             current_run = start_run + (delay_step * runs_per_delay) + rep
             root_file_name = f"Results/Run{current_run:06d}_SCurve.root"
             
@@ -365,10 +391,12 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f" [!] Error loading chip {hw_id} from run {current_run}: {e}")
 
+    # Process all aggregated data frames
     if raw_dataframes:
         raw_master_df = pd.concat(raw_dataframes, ignore_index=True)
         
         # Per-Pixel Pre-Averaging
+        # Groups identical pixels together across their N multiple runs to average their values.
         master_df = raw_master_df.groupby(
             ["Delay", "Chip", "Type", "Row", "Col"]
         ).agg(
@@ -384,6 +412,7 @@ if __name__ == "__main__":
         
         chip_ids_found = master_df["Chip"].unique()
         
+        # Generate plots for each chip found in the data
         for c_id in chip_ids_found:
             df_for_this_chip = master_df[master_df["Chip"] == c_id]
             generate_plots(df_for_this_chip, chip_id=c_id)

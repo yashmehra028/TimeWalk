@@ -44,27 +44,26 @@ def run_scurve_scan(xml_filename="CMSIT_RD53B.xml", num_scans=32, runs_per_delay
                     check=True,
                     timeout=180
                 )
-                print(f"    SUCCESS! SCurve {rep+1} for delay {delay} completed.")
+                print(f"SUCCESS! SCurve {rep+1} for delay {delay} completed.")
 
             except subprocess.CalledProcessError:
                 # Triggered if CMSITminiDAQ exits with an error code (Data Corruption)
                 print(f"\n[!] WARNING: Run crashed (Data Corruption / Out of range).")
                 print(f"    Delay {delay} seems physically unstable. Skipping the remaining {runs_per_delay - rep - 1} runs for this delay...")
-                time.sleep(5) # Give the FC7 board time to reset its memory
-                break # Break out of the inner loop and move to the next delay
+                time.sleep(5)
+                break
                 
             except subprocess.TimeoutExpired:
                 # Triggered if CMSITminiDAQ gets stuck in an infinite "retry" loop
                 print(f"\n[!] TIMEOUT: Run is stuck in infinite 'retries'. Aborting.")
                 print(f"    Delay {delay} seems physically unstable. Skipping the remaining {runs_per_delay - rep - 1} runs for this delay...")
-                time.sleep(5) # Give the hardware time to recover
-                break # Break out of the inner loop and move to the next delay
+                time.sleep(5)
+                break
                 
-        # Update the content variable for the next delay iteration
+        # Update the content variable
         content = new_content
 
     print("\n--- Automated SCurve scan complete! ---")
 
 if __name__ == "__main__":
-    # You can change num_scans or runs_per_delay here
-    run_scurve_scan(xml_filename="CMSIT_RD53B.xml", num_scans=32, runs_per_delay=1)
+    run_scurve_scan(xml_filename="CMSIT_RD53B.xml", num_scans=32, runs_per_delay=5)
