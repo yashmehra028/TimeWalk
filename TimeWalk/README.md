@@ -106,7 +106,7 @@ To ensure the integration with the Ph2_ACF middleware, the scripts must be place
         *   Top-Right (TR): `DAC_PREAMP_TR_LIN`
 
 <p align="center">
-  <img src="image_578788.png" alt="CROCv2 AFE Biasing Regions" width="500"/>
+  <img src="./sensor_geometry_powering.png" alt="CROCv2 AFE Biasing Regions" width="500"/>
   <br>
   <em>Spatial distribution of the biasing regions across the CROC matrix and their Double-Column Bias connections.</em>
 </p>
