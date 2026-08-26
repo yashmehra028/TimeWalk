@@ -1,22 +1,40 @@
 # Geometrical configuration for Quad-Module IT Phase-2
 # RD53B / CROC: 336 rows (0-335) x 432 columns (0-431)
+#
+# Timing Alignment Rationale:
+# Edge, top, and corner pixels have larger surface areas (longer pitches) to bridge
+# the inter-chip gaps, resulting in higher sensor capacitance (C_in).
+# This increased capacitance slows down the preamplifier rise time.
+# By increasing the corresponding DAC_PREAMP_*_LIN register, the input transistor bias
+# current is boosted, compensating for the extra load and shifting the Threshold vs. Delay
+# curve to align with the standard central matrix pixels.
 
 chip_0_2:
   # Chip 0 and 2:
-  # 87.5x225 um^2 pixels: [0;0] and [0;1]
-  # 87.5x100 um^2 pixels: from [0;2] to [0;335]
-  # 25x225 um^2 pixels: from [1;0] to [431;0]
-  #                     from [1;1] to [431;1]
-  # 25x100 um^2 pixels: from [1;2] to [431;335]
+  # - Macro_Corner (87.5x225 um^2): [0;0] and [0;1]      -> Adjust DAC_PREAMP_TL_LIN
+  # - Long_Col     (87.5x100 um^2): [0;2] to [0;335]     -> Adjust DAC_PREAMP_L_LIN
+  # - Long_Row     (25x225 um^2)  : [1;0] to [431;0]     -> Adjust DAC_PREAMP_T_LIN
+  #                                 [1;1] to [431;1]     -> Adjust DAC_PREAMP_T_LIN
+  # - Standard     (25x100 um^2)  : [1;2] to [431;335]   -> Adjust DAC_PREAMP_M_LIN
   long_rows: [0, 1]
   long_cols: [0]
+  preamp_dac_mapping:
+    Standard: "DAC_PREAMP_M_LIN"
+    Long_Row: "DAC_PREAMP_T_LIN"
+    Long_Col: "DAC_PREAMP_L_LIN"
+    Macro_Corner: "DAC_PREAMP_TL_LIN"
 
 chip_1_3:
   # Chip 1 and 3:
-  # 87.5x225 um^2 pixels: [431;0] and [431;1]
-  # 87.5x100 um^2 pixels: from [431;2] to [431;335]
-  # 25x225 um^2 pixels: from [0;0] to [430;0]
-  #                     from [0;1] to [430;1]
-  # 25x100 um^2 pixels: from [0;2] to [430;335]
+  # - Macro_Corner (87.5x225 um^2): [431;0] and [431;1]    -> Adjust DAC_PREAMP_TR_LIN
+  # - Long_Col     (87.5x100 um^2): [431;2] to [431;335]   -> Adjust DAC_PREAMP_R_LIN
+  # - Long_Row     (25x225 um^2)  : [0;0] to [430;0]       -> Adjust DAC_PREAMP_T_LIN
+  #                                 [0;1] to [430;1]       -> Adjust DAC_PREAMP_T_LIN
+  # - Standard     (25x100 um^2)  : [0;2] to [430;335]     -> Adjust DAC_PREAMP_M_LIN
   long_rows: [0, 1]
   long_cols: [431]
+  preamp_dac_mapping:
+    Standard: "DAC_PREAMP_M_LIN"
+    Long_Row: "DAC_PREAMP_T_LIN"
+    Long_Col: "DAC_PREAMP_R_LIN"
+    Macro_Corner: "DAC_PREAMP_TR_LIN"
