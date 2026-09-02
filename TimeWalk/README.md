@@ -82,3 +82,31 @@ To ensure the integration with the Ph2_ACF middleware, the scripts must be place
     ```bash
     python3 scurve_uniformity.py
     ```
+
+## 4. Matrix Geometry & Timing Alignment
+
+### `sensor_geometry.yaml` (Pixel Matrix & Front-End Tuning Map)
+**Purpose:** Maps the physical coordinates of the CROCv2 pixel matrix to their specific geometric types (Standard, Long_Row, Long_Col, Macro_Corner) and identifies the corresponding analog front-end (AFE) preamplifier bias registers needed for precise timing alignment.
+*   **Input:** Utilized as a static configuration dictionary by the `GeometryManager` class in the data analysis scripts.
+*   **Output:** Classifies any given row and column coordinate pair into its geometric category to apply statistical groupings and fitting algorithms.
+*   **Methodology & Physics Context:** 
+    *   In Quad-Module assemblies, the physical gaps between the four readout chips require the edge and corner pixels of the sensor to have elongated pitches (e.g., 25 x 225 µm² or 87.5 x 100 µm²) to maintain full hermeticity. 
+    *   These larger pixel volumes inherently possess a higher sensor capacitance ($C_{in}$), which slows down the rise time of the preamplifier. 
+    *   To ensure uniform timing across the entire matrix (i.e., aligning the S-Curve Threshold vs. Delay minima), the input transistor bias current for these specific regions must be boosted independently to compensate for the extra capacitive load.
+*   **DAC Register Mapping:** The matrix is divided into specific tuning zones depending on the chip's logical position in the Quad-Module. The corresponding registers must be tuned to perfectly align the timing of the edge/corner pixels with the standard matrix.
+    *   **Chips 0 & 2 (Left side of the module):**
+        *   Standard Pixels (M): `DAC_PREAMP_M_LIN`
+        *   Top Edge (T): `DAC_PREAMP_T_LIN`
+        *   Left Edge (L): `DAC_PREAMP_L_LIN`
+        *   Top-Left (TL): `DAC_PREAMP_TL_LIN`
+    *   **Chips 1 & 3 (Right side of the module):**
+        *   Standard Pixels (M): `DAC_PREAMP_M_LIN`
+        *   Top Edge (T): `DAC_PREAMP_T_LIN`
+        *   Right Edge (R): `DAC_PREAMP_R_LIN`
+        *   Top-Right (TR): `DAC_PREAMP_TR_LIN`
+
+<p align="center">
+  <img src="./sensor_geometry_powering.png" alt="CROCv2 AFE Biasing Regions" width="500"/>
+  <br>
+  <em>Spatial distribution of the biasing regions across the CROC matrix and their Double-Column Bias connections.</em>
+</p>
