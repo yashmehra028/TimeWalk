@@ -2,6 +2,7 @@ import re
 import time
 import subprocess
 import sys
+import argparse
 
 def run_scurve_scan(xml_filename="CMSIT_RD53B.xml", num_scans=32, runs_per_delay=5):
     total_runs = num_scans * runs_per_delay
@@ -66,4 +67,14 @@ def run_scurve_scan(xml_filename="CMSIT_RD53B.xml", num_scans=32, runs_per_delay
     print("\n--- Automated SCurve scan complete! ---")
 
 if __name__ == "__main__":
-    run_scurve_scan(xml_filename="CMSIT_RD53B.xml", num_scans=32, runs_per_delay=5)
+    parser = argparse.ArgumentParser(description="Execute SCurve scans for Ph2_ACF.")
+    parser.add_argument('--xml_filename', type=str, default="CMSIT.xml", help="Target XML configuration file")
+    parser.add_argument('--num_scans', type=int, default=32, help="Number of delay steps to sweep")
+    parser.add_argument('--runs_per_delay', type=int, default=4, help="Repeated SCurve runs per delay step")
+    args = parser.parse_args()
+
+    run_scurve_scan(
+        xml_filename=args.xml_filename, 
+        num_scans=args.num_scans, 
+        runs_per_delay=args.runs_per_delay
+    )
