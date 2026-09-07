@@ -10,16 +10,18 @@ import re
 # Configuration
 # ==========================================
 XML_CONFIG = "CMSIT.xml"
-CHIP_ID = 0
 YAML_GEO = "sensor_geometry.yaml"
 TOLERANCE_PERCENT = 5.0
-MAX_ITERATIONS = 6
+MAX_ITERATIONS = 9
 PREAMP_ABSOLUTE_MIN = 200
-PREAMP_ABSOLUTE_MAX = 600
+PREAMP_ABSOLUTE_MAX = 700
+
+# Explicitly define which chips to tune
+TARGET_CHIPS = [0,2]  # e.g., [0, 1, 2, 3] for all
 
 # Sync Parameters for scurve_launch and scurve_graph
 NUM_SCANS = 32
-RUNS_PER_DELAY = 3
+RUNS_PER_DELAY = 4
 
 # Physical surface area map for RD53B/CROC (um^2)
 PIXEL_AREAS = {
@@ -29,6 +31,17 @@ PIXEL_AREAS = {
     'Standard':     25.0 * 100.0,  # 2500.0
     'Default':      25.0 * 100.0
 }
+
+def configure_target_chips(xml_file, target_chips):
+    """Enables targeted chips and disables the rest in CMSIT.xml."""
+    tree = ET.parse(xml_file)
+    for chip in tree.getroot().iter("RD53Bv2"):
+        chip_id = int(chip.attrib.get("Id", -1))
+        if chip_id in target_chips:
+            chip.attrib["enable"] = "1"
+        else:
+            chip.attrib["enable"] = "0"
+    tree.write(xml_file, encoding="UTF-8", xml_declaration=True)
 
 def get_next_run_number(results_dir="Results"):
     """Finds the highest run number in the Results directory and adds 1."""
@@ -61,18 +74,21 @@ def get_xml_register(xml_file, register_name, chip_id):
         if chip.attrib.get("Id") == str(chip_id):
             return int(chip.find("Settings").attrib[register_name])
             
-def update_xml_registers(xml_file, updates_dict, chip_id):
+def update_xml_registers(xml_file, multi_updates_dict):
+    """Updates registers for multiple chips simultaneously."""
     tree = ET.parse(xml_file)
     for chip in tree.getroot().iter("RD53Bv2"):
-        if chip.attrib.get("Id") == str(chip_id):
+        chip_id = int(chip.attrib.get("Id", -1))
+        if chip_id in multi_updates_dict:
             settings = chip.find("Settings")
-            for reg, val in updates_dict.items():
+            for reg, val in multi_updates_dict[chip_id].items():
                 settings.attrib[reg] = str(int(val))
     tree.write(xml_file, encoding="UTF-8", xml_declaration=True)
 
-def evaluate_optimal_delays(chip_id):
+def evaluate_optimal_delays():
+    """Runs the pipeline and returns the delay dictionary for all chips."""
     start_run = get_next_run_number()
-    print(f"   -> Auto-detected next start_run: {start_run}")
+    print(f"\n   -> Auto-detected next start_run: {start_run}")
     
     print("   -> Running scurve_launch.py...")
     subprocess.run(
@@ -92,108 +108,138 @@ def evaluate_optimal_delays(chip_id):
 
     with open(delay_file, 'r') as file:
         all_delays = yaml.safe_load(file)
-        
-    chip_key = f"chip_{chip_id}"
-    if chip_key not in all_delays:
-        raise KeyError(f"Error: {chip_key} not found in {delay_file}")
 
-    return all_delays[chip_key]
+    return all_delays
 
 def main():
-    dac_map = get_dac_mappings(CHIP_ID)
+    print(f"**Step 0: Configuring XML for Target Chips: {TARGET_CHIPS}**")
+    configure_target_chips(XML_CONFIG, TARGET_CHIPS)
     
-    print("**Step 1: Running Initial Baseline Evaluation**")
-    opt_delays = evaluate_optimal_delays(CHIP_ID)
+    print("\n**Step 1: Running Initial Baseline Evaluation**")
+    opt_delays_all = evaluate_optimal_delays()
     
-    # Auto-infer reference pixel (the one with the smallest physical area)
-    found_geometries = list(opt_delays.keys())
-    if not found_geometries:
-        raise ValueError("No valid pixel geometries were returned by scurve_graph.py")
-        
-    reference_type = min(found_geometries, key=lambda k: PIXEL_AREAS.get(k, float('inf')))
-    opt_std = opt_delays[reference_type]
-    
-    # Any type found in the output that isn't the smallest and has a mapped DAC becomes a target
-    target_types = [p for p in found_geometries if p != reference_type and p in dac_map]
-    
-    print(f"\n**Auto-Detection Complete**")
-    print(f"  Reference Pixel (Smallest Area): {reference_type} (Opt Delay = {opt_std:.2f})")
-    print(f"  Target Geometries for Alignment: {target_types}\n")
-    
-    if not target_types:
-        print("No target geometries require alignment. Exiting.")
-        return
-
-    # Initialize search state
+    # State tracking dictionaries
     search_state = {}
-    for p_type in target_types:
-        reg_name = dac_map[p_type]
-        current_val = get_xml_register(XML_CONFIG, reg_name, CHIP_ID)
-        search_state[p_type] = {
-            'reg': reg_name,
-            'current': current_val,
-            'low': PREAMP_ABSOLUTE_MIN,
-            'high': PREAMP_ABSOLUTE_MAX,
-            'converged': False
-        }
+    reference_map = {}
     
-    # Evaluate initial bounds
-    for p_type in target_types:
-        state = search_state[p_type]
-        opt_val = opt_delays[p_type]
-        err = (abs(opt_val - opt_std) / opt_std) * 100.0
+    # Evaluate initial bounds for target chips
+    for chip_id in TARGET_CHIPS:
+        chip_key = f"chip_{chip_id}"
+        if chip_key not in opt_delays_all:
+            print(f" [!] No data found for {chip_key} in output. Skipping alignment for this chip.")
+            continue
+            
+        opt_delays = opt_delays_all[chip_key]
+        dac_map = get_dac_mappings(chip_id)
         
-        print(f"Initial State - {p_type} ({state['reg']}): Min = {opt_val:.2f} | Err = {err:.2f}%")
+        # Auto-infer reference pixel per chip
+        found_geometries = list(opt_delays.keys())
+        reference_type = min(found_geometries, key=lambda k: PIXEL_AREAS.get(k, float('inf')))
+        reference_map[chip_id] = reference_type
+        opt_std = opt_delays[reference_type]
         
-        if err <= TOLERANCE_PERCENT:
-            state['converged'] = True
-        elif opt_val > opt_std:
-            state['high'] = state['current'] 
-        else:
-            state['low'] = state['current']  
+        target_types = [p for p in found_geometries if p != reference_type and p in dac_map]
+        
+        print(f"\n**Chip {chip_id} Auto-Detection:**")
+        print(f"  Reference Pixel: {reference_type} (Opt Delay = {opt_std:.2f})")
+        print(f"  Target Geometries: {target_types}")
+        
+        if not target_types:
+            print(f"  -> No target geometries require alignment for Chip {chip_id}.")
+            continue
+            
+        search_state[chip_id] = {}
+        for p_type in target_types:
+            reg_name = dac_map[p_type]
+            current_val = get_xml_register(XML_CONFIG, reg_name, chip_id)
+            search_state[chip_id][p_type] = {
+                'reg': reg_name,
+                'current': current_val,
+                'low': PREAMP_ABSOLUTE_MIN,
+                'high': PREAMP_ABSOLUTE_MAX,
+                'converged': False
+            }
+            
+            opt_val = opt_delays[p_type]
+            err = (abs(opt_val - opt_std) / opt_std) * 100.0
+            print(f"  -> Initial State {p_type} ({reg_name}): Min = {opt_val:.2f} | Err = {err:.2f}%")
+            
+            if err <= TOLERANCE_PERCENT:
+                search_state[chip_id][p_type]['converged'] = True
+            elif opt_val > opt_std:
+                search_state[chip_id][p_type]['high'] = current_val 
+            else:
+                search_state[chip_id][p_type]['low'] = current_val  
+
+    if not search_state:
+        print("\nNo targets to align across any chips. Exiting.")
+        return
 
     # Synchronous Binary Search Loop
     for iteration in range(1, MAX_ITERATIONS + 1):
-        active_targets = [p for p in target_types if not search_state[p]['converged']]
-        if not active_targets:
-            print("\n**SUCCESS:** All target geometries converged!")
-            break
-            
-        print(f"\n**Iteration {iteration}: Updating Registers**")
-        updates = {}
-        for p_type in active_targets:
-            state = search_state[p_type]
-            if state['low'] > state['high']:
-                print(f"Warning: Bounds collapsed for {p_type}. Forcing convergence.")
-                state['converged'] = True
+        multi_updates = {}
+        all_chips_converged = True
+        
+        for chip_id, targets in search_state.items():
+            active_targets = [p for p, s in targets.items() if not s['converged']]
+            if not active_targets:
                 continue
                 
-            mid = int((state['low'] + state['high']) / 2)
-            state['current'] = mid
-            updates[state['reg']] = mid
-            print(f"Testing {state['reg']} = {mid}")
-            
-        if updates:
-            update_xml_registers(XML_CONFIG, updates, CHIP_ID)
-            opt_delays = evaluate_optimal_delays(CHIP_ID)
-            opt_std = opt_delays[reference_type]
+            all_chips_converged = False
+            multi_updates[chip_id] = {}
             
             for p_type in active_targets:
-                state = search_state[p_type]
-                opt_val = opt_delays[p_type]
-                err = (abs(opt_val - opt_std) / opt_std) * 100.0
-                
-                print(f"Result {p_type}: Min = {opt_val:.2f} | Err = {err:.2f}%")
-                if err <= TOLERANCE_PERCENT:
+                state = targets[p_type]
+                if state['low'] > state['high']:
+                    print(f"Warning: Bounds collapsed for Chip {chip_id} - {p_type}. Forcing convergence.")
                     state['converged'] = True
-                elif opt_val > opt_std:
-                    state['high'] = state['current'] - 1
-                else:
-                    state['low'] = state['current'] + 1
+                    continue
+                    
+                mid = int((state['low'] + state['high']) / 2)
+                state['current'] = mid
+                multi_updates[chip_id][state['reg']] = mid
+        
+        if all_chips_converged:
+            print("\n**SUCCESS:** All target geometries across all chips converged!")
+            break
+            
+        if multi_updates:
+            print(f"\n**Iteration {iteration}: Updating Registers**")
+            for c_id, updates in multi_updates.items():
+                print(f"  Chip {c_id}: {updates}")
+                
+            update_xml_registers(XML_CONFIG, multi_updates)
+            opt_delays_all = evaluate_optimal_delays()
+            
+            # Re-evaluate
+            for chip_id in multi_updates.keys():
+                chip_key = f"chip_{chip_id}"
+                opt_delays = opt_delays_all.get(chip_key)
+                if not opt_delays:
+                    continue
+                    
+                opt_std = opt_delays[reference_map[chip_id]]
+                
+                for p_type, state in search_state[chip_id].items():
+                    if state['converged'] or state['reg'] not in multi_updates[chip_id]:
+                        continue
+                        
+                    opt_val = opt_delays[p_type]
+                    err = (abs(opt_val - opt_std) / opt_std) * 100.0
+                    
+                    print(f"  Result Chip {chip_id} - {p_type}: Min = {opt_val:.2f} | Err = {err:.2f}%")
+                    if err <= TOLERANCE_PERCENT:
+                        state['converged'] = True
+                    elif opt_val > opt_std:
+                        state['high'] = state['current'] - 1
+                    else:
+                        state['low'] = state['current'] + 1
 
     print("\n**Final Configuration Locked:**")
-    for p_type in target_types:
-        print(f"  {p_type}: {search_state[p_type]['reg']} = {search_state[p_type]['current']}")
+    for chip_id, targets in search_state.items():
+        print(f"  Chip {chip_id}:")
+        for p_type, state in targets.items():
+            print(f"    {p_type}: {state['reg']} = {state['current']}")
 
 if __name__ == "__main__":
     main()
