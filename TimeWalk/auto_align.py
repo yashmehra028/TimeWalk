@@ -1,10 +1,29 @@
 #!/usr/bin/env python3
 import os
+import sys
 import subprocess
 import yaml
 import xml.etree.ElementTree as ET
 import glob
 import re
+from datetime import datetime
+
+# ==========================================
+# Terminal & File Logger (The "Tee" Pattern)
+# ==========================================
+class Logger:
+    def __init__(self, filename="auto_align.log"):
+        self.terminal = sys.stdout
+        self.log_file = open(filename, "w")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log_file.write(message)
+        self.log_file.flush() # Forces write to disk immediately
+
+    def flush(self):
+        self.terminal.flush()
+        self.log_file.flush()
 
 # ==========================================
 # Configuration
@@ -14,26 +33,23 @@ YAML_GEO = "sensor_geometry.yaml"
 TOLERANCE_PERCENT = 5.0
 MAX_ITERATIONS = 9
 PREAMP_ABSOLUTE_MIN = 200
-PREAMP_ABSOLUTE_MAX = 700
+PREAMP_ABSOLUTE_MAX = 600
+MAX_FIT_REL_ERROR = 50.0
 
-# Explicitly define which chips to tune
-TARGET_CHIPS = [0,2]  # e.g., [0, 1, 2, 3] for all
+TARGET_CHIPS = [0, 2]
 
-# Sync Parameters for scurve_launch and scurve_graph
 NUM_SCANS = 32
-RUNS_PER_DELAY = 4
+RUNS_PER_DELAY = 3
 
-# Physical surface area map for RD53B/CROC (um^2)
 PIXEL_AREAS = {
-    'Macro_Corner': 87.5 * 225.0,  # 19687.5
-    'Long_Row':     25.0 * 225.0,  # 5625.0
-    'Long_Col':     87.5 * 100.0,  # 8750.0
-    'Standard':     25.0 * 100.0,  # 2500.0
+    'Macro_Corner': 87.5 * 225.0,
+    'Long_Row':     25.0 * 225.0,
+    'Long_Col':     87.5 * 100.0,
+    'Standard':     25.0 * 100.0,
     'Default':      25.0 * 100.0
 }
 
 def configure_target_chips(xml_file, target_chips):
-    """Enables targeted chips and disables the rest in CMSIT.xml."""
     tree = ET.parse(xml_file)
     for chip in tree.getroot().iter("RD53Bv2"):
         chip_id = int(chip.attrib.get("Id", -1))
@@ -43,25 +59,7 @@ def configure_target_chips(xml_file, target_chips):
             chip.attrib["enable"] = "0"
     tree.write(xml_file, encoding="UTF-8", xml_declaration=True)
 
-def get_next_run_number(results_dir="Results"):
-    """Finds the highest run number in the Results directory and adds 1."""
-    if not os.path.exists(results_dir):
-        return 1
-        
-    files = glob.glob(os.path.join(results_dir, "Run*_SCurve.root"))
-    if not files:
-        return 1
-    
-    run_numbers = []
-    for f in files:
-        match = re.search(r"Run(\d+)_", os.path.basename(f))
-        if match:
-            run_numbers.append(int(match.group(1)))
-            
-    return max(run_numbers) + 1 if run_numbers else 1
-
 def get_dac_mappings(chip_id):
-    """Parses sensor_geometry.yaml to return all available DAC register mappings."""
     with open(YAML_GEO, 'r') as file:
         geo = yaml.safe_load(file)
         
@@ -75,7 +73,6 @@ def get_xml_register(xml_file, register_name, chip_id):
             return int(chip.find("Settings").attrib[register_name])
             
 def update_xml_registers(xml_file, multi_updates_dict):
-    """Updates registers for multiple chips simultaneously."""
     tree = ET.parse(xml_file)
     for chip in tree.getroot().iter("RD53Bv2"):
         chip_id = int(chip.attrib.get("Id", -1))
@@ -86,15 +83,32 @@ def update_xml_registers(xml_file, multi_updates_dict):
     tree.write(xml_file, encoding="UTF-8", xml_declaration=True)
 
 def evaluate_optimal_delays():
-    """Runs the pipeline and returns the delay dictionary for all chips."""
-    start_run = get_next_run_number()
-    print(f"\n   -> Auto-detected next start_run: {start_run}")
+    # 1. Take a snapshot of the Results directory BEFORE hardware runs
+    os.makedirs("Results", exist_ok=True)
+    existing_files = set(glob.glob("Results/Run*_SCurve.root"))
     
-    print("   -> Running scurve_launch.py...")
+    print("\n   -> Running scurve_launch.py...")
     subprocess.run(
         f"python3 scurve_launch.py --xml_filename {XML_CONFIG} --num_scans {NUM_SCANS} --runs_per_delay {RUNS_PER_DELAY}", 
         shell=True, check=True
     )
+    
+    # 2. Take a snapshot AFTER to see exactly what Ph2_ACF generated
+    all_files = set(glob.glob("Results/Run*_SCurve.root"))
+    new_files = all_files - existing_files
+    
+    if not new_files:
+        raise RuntimeError("[!] scurve_launch.py finished, but no new ROOT files were found in Results/")
+        
+    # 3. Extract the run numbers from ONLY the newly generated files
+    new_run_numbers = []
+    for f in new_files:
+        match = re.search(r"Run(\d+)_", os.path.basename(f))
+        if match:
+            new_run_numbers.append(int(match.group(1)))
+            
+    start_run = min(new_run_numbers)
+    print(f"   -> Ph2_ACF assigned starting run number: {start_run}")
     
     print(f"   -> Running scurve_graph.py with --start_run {start_run}...")
     subprocess.run(
@@ -118,11 +132,9 @@ def main():
     print("\n**Step 1: Running Initial Baseline Evaluation**")
     opt_delays_all = evaluate_optimal_delays()
     
-    # State tracking dictionaries
     search_state = {}
     reference_map = {}
     
-    # Evaluate initial bounds for target chips
     for chip_id in TARGET_CHIPS:
         chip_key = f"chip_{chip_id}"
         if chip_key not in opt_delays_all:
@@ -132,17 +144,23 @@ def main():
         opt_delays = opt_delays_all[chip_key]
         dac_map = get_dac_mappings(chip_id)
         
-        # Auto-infer reference pixel per chip
         found_geometries = list(opt_delays.keys())
         reference_type = min(found_geometries, key=lambda k: PIXEL_AREAS.get(k, float('inf')))
         reference_map[chip_id] = reference_type
-        opt_std = opt_delays[reference_type]
         
-        target_types = [p for p in found_geometries if p != reference_type and p in dac_map]
+        opt_ref = opt_delays[reference_type]['val']
+        ref_err = opt_delays[reference_type].get('err', 0.0)
         
         print(f"\n**Chip {chip_id} Auto-Detection:**")
-        print(f"  Reference Pixel: {reference_type} (Opt Delay = {opt_std:.2f})")
-        print(f"  Target Geometries: {target_types}")
+        print(f"  Reference Pixel: {reference_type} (Opt Delay = {opt_ref:.2f})")
+        
+        rel_ref_err = (ref_err / opt_ref * 100.0) if opt_ref != 0 else float('inf')
+        if ref_err == 0.0 or rel_ref_err > MAX_FIT_REL_ERROR:
+            print(f"  [!] CRITICAL ABORT: Smallest geometry ({reference_type}) fit failed (Rel Error = {rel_ref_err:.1f}%).")
+            print(f"      Cannot align this chip without a valid reference baseline.")
+            continue
+
+        target_types = [p for p in found_geometries if p != reference_type and p in dac_map]
         
         if not target_types:
             print(f"  -> No target geometries require alignment for Chip {chip_id}.")
@@ -150,6 +168,14 @@ def main():
             
         search_state[chip_id] = {}
         for p_type in target_types:
+            opt_val = opt_delays[p_type]['val']
+            opt_err_margin = opt_delays[p_type].get('err', 0.0)
+            
+            rel_err_margin = (opt_err_margin / opt_val * 100.0) if opt_val != 0 else float('inf')
+            if opt_err_margin == 0.0 or rel_err_margin > MAX_FIT_REL_ERROR:
+                print(f"  [!] SKIPPED {p_type}: Fit failed, curve is flat or fit is bad or fit out of bounds (Rel Error = {rel_err_margin:.1f}%).")
+                continue
+                
             reg_name = dac_map[p_type]
             current_val = get_xml_register(XML_CONFIG, reg_name, chip_id)
             search_state[chip_id][p_type] = {
@@ -160,13 +186,12 @@ def main():
                 'converged': False
             }
             
-            opt_val = opt_delays[p_type]
-            err = (abs(opt_val - opt_std) / opt_std) * 100.0
-            print(f"  -> Initial State {p_type} ({reg_name}): Min = {opt_val:.2f} | Err = {err:.2f}%")
+            err = (abs(opt_val - opt_ref) / opt_ref) * 100.0
+            print(f"  -> Initial State {p_type} ({reg_name}): Min = {opt_val:.2f} | Align Err = {err:.2f}%")
             
             if err <= TOLERANCE_PERCENT:
                 search_state[chip_id][p_type]['converged'] = True
-            elif opt_val > opt_std:
+            elif opt_val > opt_ref:
                 search_state[chip_id][p_type]['high'] = current_val 
             else:
                 search_state[chip_id][p_type]['low'] = current_val  
@@ -175,7 +200,6 @@ def main():
         print("\nNo targets to align across any chips. Exiting.")
         return
 
-    # Synchronous Binary Search Loop
     for iteration in range(1, MAX_ITERATIONS + 1):
         multi_updates = {}
         all_chips_converged = True
@@ -211,26 +235,34 @@ def main():
             update_xml_registers(XML_CONFIG, multi_updates)
             opt_delays_all = evaluate_optimal_delays()
             
-            # Re-evaluate
             for chip_id in multi_updates.keys():
                 chip_key = f"chip_{chip_id}"
                 opt_delays = opt_delays_all.get(chip_key)
                 if not opt_delays:
                     continue
                     
-                opt_std = opt_delays[reference_map[chip_id]]
+                opt_ref = opt_delays[reference_map[chip_id]]['val']
                 
                 for p_type, state in search_state[chip_id].items():
                     if state['converged'] or state['reg'] not in multi_updates[chip_id]:
                         continue
                         
-                    opt_val = opt_delays[p_type]
-                    err = (abs(opt_val - opt_std) / opt_std) * 100.0
+                    opt_val = opt_delays[p_type]['val']
+                    opt_err_margin = opt_delays[p_type].get('err', 0.0)
                     
-                    print(f"  Result Chip {chip_id} - {p_type}: Min = {opt_val:.2f} | Err = {err:.2f}%")
+                    rel_err_margin = (opt_err_margin / opt_val * 100.0) if opt_val != 0 else float('inf')
+                    if opt_err_margin == 0.0 or rel_err_margin > MAX_FIT_REL_ERROR:
+                        print(f"  [!] Warning Chip {chip_id} - {p_type}: Fit failed or too flat or out of bounds or bad fit (Rel Err={rel_err_margin:.1f}%). ")
+                        print(f"      -> Abandoning search for this geometry to allow pipeline to finish.")
+                        state['converged'] = True
+                        continue
+                        
+                    err = (abs(opt_val - opt_ref) / opt_ref) * 100.0
+                    
+                    print(f"  Result Chip {chip_id} - {p_type}: Min = {opt_val:.2f} | Align Err = {err:.2f}%")
                     if err <= TOLERANCE_PERCENT:
                         state['converged'] = True
-                    elif opt_val > opt_std:
+                    elif opt_val > opt_ref:
                         state['high'] = state['current'] - 1
                     else:
                         state['low'] = state['current'] + 1
@@ -242,4 +274,12 @@ def main():
             print(f"    {p_type}: {state['reg']} = {state['current']}")
 
 if __name__ == "__main__":
+    # Initialize the logger before anything runs
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_filename = f"auto_align_{timestamp}.log"
+    sys.stdout = Logger(log_filename)
+    
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Starting Calibration Pipeline...")
+    print(f"Log file initialized: {log_filename}\n")
+    
     main()

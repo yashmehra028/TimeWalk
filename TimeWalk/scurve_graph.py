@@ -181,11 +181,15 @@ def generate_plots(chip_dataframe, chip_id):
         
         # Determine a fallback raw minimum in case the curve fit fails
         raw_min_x = x_data[np.argmin(y_data)]
-        chip_optimal_delays[p_type] = float(raw_min_x) # Set fallback initially
+        chip_optimal_delays[p_type] = {'val': float(raw_min_x), 'err': 0.0} # Set fallback initially
 
         if len(x_data) >= 5:
-            if (np.max(y_data) - np.min(y_data)) < 2.0:
-                print(f"   -> Skipping fits for {p_type}: Threshold is practically flat.")
+            # --- SAFEGUARD 1: Amplitude vs Noise ---
+            amplitude = np.max(y_data) - np.min(y_data)
+            mean_noise = np.mean(yerr_data)
+            
+            if amplitude < 2.0:
+                print(f"   -> Skipping fits for {p_type}: Curve is statistically flat (Amp: {amplitude:.1f}, Noise: {mean_noise:.1f}).")
             else:
                 try:
                     import warnings
@@ -195,7 +199,7 @@ def generate_plots(chip_dataframe, chip_id):
                         warnings.simplefilter("ignore", OptimizeWarning)
                         
                         guess_offset = np.mean(y_data)
-                        guess_amp = (np.max(y_data) - np.min(y_data)) / 2.0
+                        guess_amp = amplitude / 2.0
                         guess_freq = 2.0 * np.pi / 32.0 
                         p0_sine = [guess_amp, guess_freq, 0.0, guess_offset]
                         
@@ -225,14 +229,21 @@ def generate_plots(chip_dataframe, chip_id):
                             sigma=yerr_safe, absolute_sigma=True, maxfev=10000
                         )
                         
-                        perr_para = np.sqrt(np.diag(pcov_para))
-                        
                         min_x_para = popt_para[1]
-                        err_x_para = perr_para[1]
                         min_y_para = popt_para[2]
 
-                        # --> MODIFICATION: Update dictionary with accurate sub-step parabolic fit vertex
-                        chip_optimal_delays[p_type] = float(min_x_para)
+                        # --- SAFEGUARD 2: Domain Boundary Test ---
+                        if min_x_para < 0 or min_x_para > 31:
+                            print(f"   [!] Rejecting fit for {p_type}: Vertex out of bounds ({min_x_para:.1f}).")
+                            # Error is forced to 0.0 so auto_align.py safely skips it
+                            chip_optimal_delays[p_type] = {'val': float(min_x_para), 'err': 0.0}
+                            continue  # Skips plotting the red fit line and moves to the next pixel type
+                        
+                        perr_para = np.sqrt(np.diag(pcov_para))
+                        err_x_para = perr_para[1]
+
+                        # Update dictionary with accurate sub-step parabolic fit vertex
+                        chip_optimal_delays[p_type] = {'val': float(min_x_para), 'err': float(err_x_para)}
 
                         y_fit_para_pts = parabola_func(x_window, *popt_para)
                         chi_sq = np.sum(((y_window - y_fit_para_pts) / yerr_safe)**2)
@@ -298,9 +309,7 @@ def generate_plots(chip_dataframe, chip_id):
     plt.savefig(filename, dpi=300, bbox_inches="tight")
     plt.close()
 
-    # --> MODIFICATION: Return the optimal delays back to the main loop
     return chip_optimal_delays
-
 # ==========================================
 # MASTER LOOP
 # ==========================================
@@ -331,10 +340,7 @@ if __name__ == "__main__":
     # Pre-load the specific mask file for each chip
     active_masks = {}
     for log_id in chip_mapping.values():
-        if log_id in [0]:
-            mask_filepath = f"my_mask_chip{log_id}_run1.txt"
-        else:
-            mask_filepath = f"my_mask_{log_id}.txt"
+        mask_filepath = f"my_mask_chip{log_id}.txt"
         print(f"Loading mask for Chip {log_id} from {mask_filepath}...")
         active_masks[log_id] = parse_mask_file(mask_filepath)
 
