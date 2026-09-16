@@ -83,9 +83,9 @@ def update_xml_registers(xml_file, multi_updates_dict):
     tree.write(xml_file, encoding="UTF-8", xml_declaration=True)
 
 def evaluate_optimal_delays():
-    # 1. Take a snapshot of the Results directory BEFORE hardware runs
+    # 1. Snapshot EVERYTHING in the directory before hardware runs
     os.makedirs("Results", exist_ok=True)
-    existing_files = set(glob.glob("Results/Run*_SCurve.root"))
+    existing_files = set(glob.glob("Results/Run*.root"))
     
     print("\n   -> Running scurve_launch.py...")
     subprocess.run(
@@ -93,8 +93,8 @@ def evaluate_optimal_delays():
         shell=True, check=True
     )
     
-    # 2. Take a snapshot AFTER to see exactly what Ph2_ACF generated
-    all_files = set(glob.glob("Results/Run*_SCurve.root"))
+    # 2. Snapshot AFTER to see exactly what new files appeared
+    all_files = set(glob.glob("Results/Run*.root"))
     new_files = all_files - existing_files
     
     if not new_files:
@@ -103,16 +103,16 @@ def evaluate_optimal_delays():
     # 3. Extract the run numbers from ONLY the newly generated files
     new_run_numbers = []
     for f in new_files:
-        match = re.search(r"Run(\d+)_", os.path.basename(f))
+        match = re.search(r"Run(\d+)", os.path.basename(f))
         if match:
             new_run_numbers.append(int(match.group(1)))
             
-    start_run = min(new_run_numbers)
-    print(f"   -> Ph2_ACF assigned starting run number: {start_run}")
+    actual_start_run = min(new_run_numbers)
+    print(f"   -> Ph2_ACF assigned starting run number: {actual_start_run}")
     
-    print(f"   -> Running scurve_graph.py with --start_run {start_run}...")
+    print(f"   -> Running scurve_graph.py with --start_run {actual_start_run}...")
     subprocess.run(
-        f"python3 scurve_graph.py --start_run {start_run} --num_scans {NUM_SCANS} --runs_per_delay {RUNS_PER_DELAY}", 
+        f"python3 scurve_graph.py --start_run {actual_start_run} --num_scans {NUM_SCANS} --runs_per_delay {RUNS_PER_DELAY}", 
         shell=True, check=True
     )
     
@@ -172,8 +172,10 @@ def main():
             opt_err_margin = opt_delays[p_type].get('err', 0.0)
             
             rel_err_margin = (opt_err_margin / opt_val * 100.0) if opt_val != 0 else float('inf')
+            
+            # Safeguard 2: Filter Initial Targets
             if opt_err_margin == 0.0 or rel_err_margin > MAX_FIT_REL_ERROR:
-                print(f"  [!] SKIPPED {p_type}: Fit failed, curve is flat or fit is bad or fit out of bounds (Rel Error = {rel_err_margin:.1f}%).")
+                print(f"  [!] SKIPPED {p_type}: Curve is flat or fit failed (Rel Error = {rel_err_margin:.1f}%).")
                 continue
                 
             reg_name = dac_map[p_type]
@@ -214,6 +216,8 @@ def main():
             
             for p_type in active_targets:
                 state = targets[p_type]
+                
+                # The Squeeze (Bounds Collapse)
                 if state['low'] > state['high']:
                     print(f"Warning: Bounds collapsed for Chip {chip_id} - {p_type}. Forcing convergence.")
                     state['converged'] = True
@@ -250,9 +254,10 @@ def main():
                     opt_val = opt_delays[p_type]['val']
                     opt_err_margin = opt_delays[p_type].get('err', 0.0)
                     
+                    # Safeguard 3: Mid-Search Abort
                     rel_err_margin = (opt_err_margin / opt_val * 100.0) if opt_val != 0 else float('inf')
                     if opt_err_margin == 0.0 or rel_err_margin > MAX_FIT_REL_ERROR:
-                        print(f"  [!] Warning Chip {chip_id} - {p_type}: Fit failed or too flat or out of bounds or bad fit (Rel Err={rel_err_margin:.1f}%). ")
+                        print(f"  [!] Warning Chip {chip_id} - {p_type}: Fit failed (Rel Err={rel_err_margin:.1f}%). ")
                         print(f"      -> Abandoning search for this geometry to allow pipeline to finish.")
                         state['converged'] = True
                         continue
@@ -260,6 +265,8 @@ def main():
                     err = (abs(opt_val - opt_ref) / opt_ref) * 100.0
                     
                     print(f"  Result Chip {chip_id} - {p_type}: Min = {opt_val:.2f} | Align Err = {err:.2f}%")
+                    
+                    # Binary Search Bounds Update
                     if err <= TOLERANCE_PERCENT:
                         state['converged'] = True
                     elif opt_val > opt_ref:
