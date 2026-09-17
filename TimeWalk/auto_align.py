@@ -30,7 +30,7 @@ class Logger:
 # ==========================================
 XML_CONFIG = "CMSIT.xml"
 YAML_GEO = "sensor_geometry.yaml"
-TOLERANCE_PERCENT = 5.0
+Z_THRESHOLD = 1.0  # Defines Z-compatibility threshold (1.0 = 1 sigma)
 MAX_ITERATIONS = 9
 PREAMP_ABSOLUTE_MIN = 200
 PREAMP_ABSOLUTE_MAX = 600
@@ -188,10 +188,13 @@ def main():
                 'converged': False
             }
             
-            err = (abs(opt_val - opt_ref) / opt_ref) * 100.0
-            print(f"  -> Initial State {p_type} ({reg_name}): Min = {opt_val:.2f} | Align Err = {err:.2f}%")
+            # Z-Score calculation for initial state
+            denom = (opt_err_margin**2 + ref_err**2)**0.5
+            z_score = abs(opt_val - opt_ref) / denom if denom > 0 else float('inf')
             
-            if err <= TOLERANCE_PERCENT:
+            print(f"  -> Initial State {p_type} ({reg_name}): Min = {opt_val:.2f} | Z-Score = {z_score:.2f}")
+            
+            if z_score <= Z_THRESHOLD:
                 search_state[chip_id][p_type]['converged'] = True
             elif opt_val > opt_ref:
                 search_state[chip_id][p_type]['high'] = current_val 
@@ -246,6 +249,7 @@ def main():
                     continue
                     
                 opt_ref = opt_delays[reference_map[chip_id]]['val']
+                ref_err = opt_delays[reference_map[chip_id]].get('err', 0.0)
                 
                 for p_type, state in search_state[chip_id].items():
                     if state['converged'] or state['reg'] not in multi_updates[chip_id]:
@@ -262,12 +266,14 @@ def main():
                         state['converged'] = True
                         continue
                         
-                    err = (abs(opt_val - opt_ref) / opt_ref) * 100.0
+                    # Z-Score calculation for active iteration
+                    denom = (opt_err_margin**2 + ref_err**2)**0.5
+                    z_score = abs(opt_val - opt_ref) / denom if denom > 0 else float('inf')
                     
-                    print(f"  Result Chip {chip_id} - {p_type}: Min = {opt_val:.2f} | Align Err = {err:.2f}%")
+                    print(f"  Result Chip {chip_id} - {p_type}: Min = {opt_val:.2f} | Z-Score = {z_score:.2f}")
                     
-                    # Binary Search Bounds Update
-                    if err <= TOLERANCE_PERCENT:
+                    # Binary Search Bounds Update using Z-Score
+                    if z_score <= Z_THRESHOLD:
                         state['converged'] = True
                     elif opt_val > opt_ref:
                         state['high'] = state['current'] - 1
